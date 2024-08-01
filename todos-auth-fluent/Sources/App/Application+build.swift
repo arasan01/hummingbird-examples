@@ -1,4 +1,5 @@
 import FluentSQLiteDriver
+import FluentPostgresDriver
 import Foundation
 import Hummingbird
 import HummingbirdAuth
@@ -19,7 +20,18 @@ func buildApplication(_ arguments: some AppArguments) async throws -> some Appli
     if arguments.inMemoryDatabase {
         fluent.databases.use(.sqlite(.memory), as: .sqlite)
     } else {
-        fluent.databases.use(.sqlite(.file("db.sqlite")), as: .sqlite)
+        fluent.databases.use(
+            .postgres(
+                configuration: .init(
+                    hostname: "nas",
+                    username: "shared",
+                    password: "selfhost-app-data",
+                    database: "todo_app_db",
+                    tls: .disable
+                )
+            ),
+            as: .psql
+        )
     }
     // add migrations
     await fluent.migrations.add(CreateUser())
