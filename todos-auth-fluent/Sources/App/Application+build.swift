@@ -24,6 +24,9 @@ func buildApplication(_ arguments: some AppArguments) async throws -> some Appli
         handler.logLevel = .trace
         return handler
     }
+    let sysEnv = Environment()
+    let otelHost = sysEnv.get("OTEL_HOST") ?? "localhost:4317"
+    
     let logger = Logger(label: "todos-auth-fluent")
     
     let environment = OTelEnvironment.detected()
@@ -35,7 +38,13 @@ func buildApplication(_ arguments: some AppArguments) async throws -> some Appli
     let resource = await resourceDetection.resource(environment: environment, logLevel: .trace)
     // Bootstrap the metrics backend to export metrics periodically in OTLP/gRPC.
     let registry = OTelMetricRegistry()
-    let metricsExporter = try OTLPGRPCMetricExporter(configuration: .init(environment: environment))
+    let metricsExporter = try OTLPGRPCMetricExporter(
+        configuration: .init(
+            environment: environment,
+            endpoint: otelHost,
+            shouldUseAnInsecureConnection: true
+        )
+    )
     let metrics = OTelPeriodicExportingMetricsReader(
         resource: resource,
         producer: registry,
@@ -48,7 +57,13 @@ func buildApplication(_ arguments: some AppArguments) async throws -> some Appli
     MetricsSystem.bootstrap(OTLPMetricsFactory(registry: registry))
     
     // Bootstrap the tracing backend to export traces periodically in OTLP/gRPC.
-    let exporter = try OTLPGRPCSpanExporter(configuration: .init(environment: environment))
+    let exporter = try OTLPGRPCSpanExporter(
+        configuration: .init(
+            environment: environment,
+            endpoint: otelHost,
+            shouldUseAnInsecureConnection: true
+        )
+    )
     let processor = OTelBatchSpanProcessor(exporter: exporter, configuration: .init(environment: environment))
     let tracer = OTelTracer(
         idGenerator: OTelRandomIDGenerator(),
@@ -68,10 +83,10 @@ func buildApplication(_ arguments: some AppArguments) async throws -> some Appli
         fluent.databases.use(
             .postgres(
                 configuration: .init(
-                    hostname: "nas",
-                    username: "shared",
-                    password: "selfhost-app-data",
-                    database: "todo_app_db",
+                    hostname: sysEnv.get("POSTGRES_HOST") ?? "localhost",
+                    username: sysEnv.get("POSTGRES_USER") ?? "postgres",
+                    password: sysEnv.get("POSTGRES_PASSWORD") ?? "password",
+                    database: sysEnv.get("POSTGRES_DB") ?? "mydb",
                     tls: .disable
                 )
             ),
@@ -109,7 +124,8 @@ func buildApplication(_ arguments: some AppArguments) async throws -> some Appli
     }
 
     // load mustache template library
-    let library = try await MustacheLibrary(directory: "templates")
+    let baseDir = sysEnv.get("TEMPLATE_BASE_DIR") ?? ""
+    let library = try await MustacheLibrary(directory: baseDir + "templates")
     assert(library.getTemplate(named: "head") != nil, "Set your working directory to the root folder of this example to get it to work")
 
     // Add routes serving HTML files

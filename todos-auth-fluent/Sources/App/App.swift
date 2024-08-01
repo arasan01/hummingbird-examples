@@ -1,6 +1,16 @@
 import ArgumentParser
 import Hummingbird
 
+/**
+ 利用する環境変数
+ OTEL_HOST
+ POSTGRES_HOST
+ POSTGRES_USER
+ POSTGRES_PASSWORD
+ POSTGRES_DB
+ TEMPLATE_BASE_DIR
+ */
+
 @main
 struct HummingbirdArguments: AsyncParsableCommand, AppArguments {
     @Option(name: .shortAndLong)
