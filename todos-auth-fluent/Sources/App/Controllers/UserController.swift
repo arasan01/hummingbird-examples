@@ -18,6 +18,7 @@ import Hummingbird
 import HummingbirdAuth
 import HummingbirdFluent
 import NIO
+import Tracing
 
 struct UserController<Context: AuthRequestContext & RequestContext> {
     let fluent: Fluent
@@ -36,16 +37,26 @@ struct UserController<Context: AuthRequestContext & RequestContext> {
     /// Create new user
     /// Used in tests, as user creation is done by ``WebController.signupDetails``
     @Sendable func create(_ request: Request, context: Context) async throws -> EditedResponse<UserResponse> {
-        let createUser = try await request.decode(as: CreateUserRequest.self, context: context)
-
-        let user = try await User.create(
-            name: createUser.name,
-            email: createUser.email,
-            password: createUser.password,
-            db: self.fluent.db()
-        )
-
-        return .init(status: .created, response: UserResponse(from: user))
+        try await withSpan("create user") { span in
+            let createUser = try await request.decode(as: CreateUserRequest.self, context: context)
+            
+            do {
+                let user = try await User.create(
+                    name: createUser.name,
+                    email: createUser.email,
+                    password: createUser.password,
+                    db: self.fluent.db()
+                )
+                
+                span.attributes["name"] = user.name
+                span.attributes["email"] = user.email
+                return .init(status: .created, response: UserResponse(from: user))
+            } catch {
+                span.recordError(error)
+                span.setStatus(.init(code: .error))
+                throw error
+            }
+        }
     }
 
     /// Login user and create session

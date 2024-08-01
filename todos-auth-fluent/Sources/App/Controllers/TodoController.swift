@@ -18,6 +18,7 @@ import Hummingbird
 import HummingbirdAuth
 import HummingbirdFluent
 import NIO
+import Tracing
 
 /// CRUD routes for todos
 struct TodoController<Context: AuthRequestContext & RequestContext> {
@@ -47,16 +48,26 @@ struct TodoController<Context: AuthRequestContext & RequestContext> {
 
     /// Create new todo
     @Sendable func create(_ request: Request, context: Context) async throws -> EditedResponse<Todo> {
-        let user = try context.auth.require(User.self)
-        let todoRequest = try await request.decode(as: CreateTodoRequest.self, context: context)
-        guard let host = request.head.authority else { throw HTTPError(.badRequest, message: "No host header") }
-        let todo = try Todo(title: todoRequest.title, ownerID: user.requireID())
-        let db = self.fluent.db()
-        _ = try await todo.save(on: db)
-        todo.completed = false
-        todo.url = "http://\(host)/api/todos/\(todo.id!)"
-        try await todo.update(on: db)
-        return .init(status: .created, response: todo)
+        try await withSpan("create todo item") { span in
+            do {
+                let user = try context.auth.require(User.self)
+                let todoRequest = try await request.decode(as: CreateTodoRequest.self, context: context)
+                guard let host = request.head.authority else { throw HTTPError(.badRequest, message: "No host header") }
+                let todo = try Todo(title: todoRequest.title, ownerID: user.requireID())
+                let db = self.fluent.db()
+                _ = try await todo.save(on: db)
+                todo.completed = false
+                todo.url = "http://\(host)/api/todos/\(todo.id!)"
+                try await todo.update(on: db)
+                span.attributes["todo_id"] = String(describing: todo.id)
+                span.attributes["todo_title"] = todo.title
+                return .init(status: .created, response: todo)
+            } catch {
+                span.recordError(error)
+                span.setStatus(.init(code: .error))
+                throw error
+            }
+        }
     }
 
     /// Get todo

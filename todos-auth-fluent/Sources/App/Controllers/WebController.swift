@@ -17,6 +17,7 @@ import Hummingbird
 import HummingbirdAuth
 import HummingbirdFluent
 import Mustache
+import Tracing
 
 /// Redirects to login page if no user has been authenticated
 struct RedirectMiddleware<Context: AuthRequestContext>: RouterMiddleware {
@@ -145,25 +146,31 @@ struct WebController<Context: AuthRequestContext & RequestContext> {
 
     /// Signup POST page
     @Sendable func signupDetails(request: Request, context: Context) async throws -> Response {
-        let details = try await request.decode(as: SignupDetails.self, context: context)
-        do {
-            // create new user
-            _ = try await User.create(
-                name: details.name,
-                email: details.email,
-                password: details.password,
-                db: self.fluent.db()
-            )
-            // redirect to login page
-            return .redirect(to: "/login", type: .found)
-        } catch let error as HTTPError {
-            // if user creation throws a conflict ie the email is already being used by
-            // another user then return signup page with error message
-            if error.status == .conflict {
-                let html = self.signupTemplate.render(["failed": true], library: self.mustacheLibrary)
-                return try HTML(html: html).response(from: request, context: context)
-            } else {
-                throw error
+        try await withSpan("signup") { span in
+            let details = try await request.decode(as: SignupDetails.self, context: context)
+            do {
+                // create new user
+                let user = try await User.create(
+                    name: details.name,
+                    email: details.email,
+                    password: details.password,
+                    db: self.fluent.db()
+                )
+                // redirect to login page
+                span.attributes["name"] = user.name
+                span.attributes["email"] = user.email
+                return .redirect(to: "/login", type: .found)
+            } catch let error as HTTPError {
+                // if user creation throws a conflict ie the email is already being used by
+                // another user then return signup page with error message
+                span.recordError(error)
+                span.setStatus(.init(code: .error))
+                if error.status == .conflict {
+                    let html = self.signupTemplate.render(["failed": true], library: self.mustacheLibrary)
+                    return try HTML(html: html).response(from: request, context: context)
+                } else {
+                    throw error
+                }
             }
         }
     }

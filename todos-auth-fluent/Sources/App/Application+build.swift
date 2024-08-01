@@ -4,6 +4,11 @@ import Foundation
 import Hummingbird
 import HummingbirdAuth
 import HummingbirdFluent
+import Logging
+import Metrics
+import OTel
+import OTLPGRPC
+import Tracing
 import Mustache
 
 public protocol AppArguments {
@@ -14,7 +19,47 @@ public protocol AppArguments {
 }
 
 func buildApplication(_ arguments: some AppArguments) async throws -> some ApplicationProtocol {
+    LoggingSystem.bootstrap { label in
+        var handler = StreamLogHandler.standardError(label: label, metadataProvider: .otel)
+        handler.logLevel = .trace
+        return handler
+    }
     let logger = Logger(label: "todos-auth-fluent")
+    
+    let environment = OTelEnvironment.detected()
+    let resourceDetection = OTelResourceDetection(detectors: [
+        OTelProcessResourceDetector(),
+        OTelEnvironmentResourceDetector(environment: environment),
+        .manual(OTelResource(attributes: ["service.name": "todos-auth-fluent-server"])),
+    ])
+    let resource = await resourceDetection.resource(environment: environment, logLevel: .trace)
+    // Bootstrap the metrics backend to export metrics periodically in OTLP/gRPC.
+    let registry = OTelMetricRegistry()
+    let metricsExporter = try OTLPGRPCMetricExporter(configuration: .init(environment: environment))
+    let metrics = OTelPeriodicExportingMetricsReader(
+        resource: resource,
+        producer: registry,
+        exporter: metricsExporter,
+        configuration: .init(
+            environment: environment,
+            exportInterval: .seconds(5) // NOTE: This is overridden for the example; the default is 60 seconds.
+        )
+    )
+    MetricsSystem.bootstrap(OTLPMetricsFactory(registry: registry))
+    
+    // Bootstrap the tracing backend to export traces periodically in OTLP/gRPC.
+    let exporter = try OTLPGRPCSpanExporter(configuration: .init(environment: environment))
+    let processor = OTelBatchSpanProcessor(exporter: exporter, configuration: .init(environment: environment))
+    let tracer = OTelTracer(
+        idGenerator: OTelRandomIDGenerator(),
+        sampler: OTelConstantSampler(isOn: true),
+        propagator: OTelW3CPropagator(),
+        processor: processor,
+        environment: environment,
+        resource: resource
+    )
+    InstrumentationSystem.bootstrap(tracer)
+    
     let fluent = Fluent(logger: logger)
     // add sqlite database
     if arguments.inMemoryDatabase {
@@ -45,6 +90,9 @@ func buildApplication(_ arguments: some AppArguments) async throws -> some Appli
     let sessionStorage = SessionStorage(fluentPersist)
     // router
     let router = Router(context: TodosAuthRequestContext.self)
+    router.middlewares.add(TracingMiddleware())
+    router.middlewares.add(MetricsMiddleware())
+    router.middlewares.add(LogRequestsMiddleware(.info))
 
     // add logging middleware
     router.add(middleware: LogRequestsMiddleware(.info))
@@ -75,6 +123,6 @@ func buildApplication(_ arguments: some AppArguments) async throws -> some Appli
         router: router,
         configuration: .init(address: .hostname(arguments.hostname, port: arguments.port))
     )
-    app.addServices(fluent, fluentPersist)
+    app.addServices(metrics, tracer, fluent, fluentPersist)
     return app
 }
